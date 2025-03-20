@@ -8,6 +8,9 @@ const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
 const handle = app.getRequestHandler();
 
+// Get OpenAI API key from Next.js environment variables
+const openaiApiKey = process.env.OPENAI_API_KEY;
+
 app.prepare().then(() => {
   const server = createServer((req, res) => {
     const parsedUrl = parse(req.url, true);
@@ -52,8 +55,8 @@ app.prepare().then(() => {
     console.log(`Transport: ${socket.conn.transport.name}`);
   });
 
-  // Apply socket handlers (this function handles its own connection events)
-  setupSocketHandlers(io);
+  // Apply socket handlers and pass the API key
+  setupSocketHandlers(io, { openaiApiKey });
 
   // Log any Socket.io errors
   io.engine.on('connection_error', (err) => {

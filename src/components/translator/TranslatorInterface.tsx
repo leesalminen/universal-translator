@@ -44,42 +44,69 @@ export default function TranslatorInterface() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const isStreamingRef = useRef(false); // Track whether we're using streaming translation
+  const hasFinalized = useRef(false); // Track audio finalization to prevent duplicate playback
   
   // Get socket connection from context
   const { socket, connected: socketConnected } = useWebSocket();
   
-  // Text to speech conversion - defined as useCallback to avoid dependency issues
+  // Refs for streaming audio data
+  const audioChunksMapRef = useRef<Map<number, Uint8Array>>(new Map());
+  const audioMetadataRef = useRef<any>(null);
+  
+  // Text to speech conversion via WebSocket - defined as useCallback to avoid dependency issues
   const textToSpeech = useCallback(async (text: string) => {
     try {
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          text,
-          language: targetLanguage,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to convert text to speech');
+      // Skip if text is empty or too short
+      if (!text || text.trim().length < 2) {
+        console.log('Text too short, skipping TTS');
+        return;
       }
-
-      const audioBlob = await response.blob();
-      const url = URL.createObjectURL(audioBlob);
       
-      setAudioURL(url);
+      if (!socket || !socketConnected) {
+        console.error('Cannot generate speech: WebSocket not connected');
+        return;
+      }
       
+      console.log('Converting to speech via WebSocket:', text.substring(0, 30) + (text.length > 30 ? '...' : ''));
+      
+      // Clean up previous audio URL if it exists
+      if (audioURL) {
+        URL.revokeObjectURL(audioURL);
+        setAudioURL(null);
+      }
+      
+      // Stop any currently playing audio
       if (audioRef.current) {
-        audioRef.current.src = url;
-        audioRef.current.play();
-        setIsPlaying(true);
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
       }
+      
+      // Clear previous audio chunks and reset flags
+      audioChunksMapRef.current.clear();
+      audioMetadataRef.current = null;
+      
+      // Reset finalization flag BEFORE sending the request
+      // This ensures we're in a clean state for the new audio generation
+      hasFinalized.current = false;
+      
+      // Request speech generation via WebSocket
+      // Use a small delay to ensure we don't send multiple requests in quick succession
+      // This helps prevent race conditions between multiple translationStream events
+      setTimeout(() => {
+        if (socket && socketConnected) {
+          socket.emit('generateSpeech', {
+            text,
+            language: targetLanguage,
+          });
+        }
+      }, 10);
+      
+      // Speech events are handled in useEffect socket listener setup
     } catch (error) {
-      console.error('Error converting text to speech:', error);
+      console.error('Error requesting speech generation:', error);
     }
-  }, [targetLanguage]);
+  }, [targetLanguage, audioURL, socket, socketConnected]);
   
   // Setup socket event listeners
   useEffect(() => {
@@ -89,18 +116,70 @@ export default function TranslatorInterface() {
     socket.on('transcription', (data) => {
       console.log('Received transcription:', data);
       if (data.text) {
-        setTranscription(prev => data.final ? data.text : prev + " " + data.text);
+        // Update transcription based on whether it's a partial or final update
+        // For partial updates, append to existing text with proper spacing
+        setTranscription(prev => {
+          if (data.final) return data.text;
+          if (!prev) return data.text;
+          return prev + (prev.endsWith(' ') ? '' : ' ') + data.text;
+        });
+        
+        // If we get a final transcription and it's not empty, start translating immediately
+        // This creates a more conversational feel by starting translation before recording stops
+        if (data.final && data.text.trim() && socket) {
+          socket.emit('startTranslation', {
+            text: data.text,
+            sourceLanguage,
+            targetLanguage
+          });
+        }
       }
     });
+    
+    // Reset streaming flag at the start of a new socket connection
+    isStreamingRef.current = false;
     
     socket.on('translation', (data) => {
       console.log('Received translation:', data);
       if (data.text) {
         setTranslation(data.text);
         
-        // Convert the translation to speech
-        if (data.final) {
+        // Only convert final translations to speech if we're not using streaming
+        // This prevents duplicate playback with translationStream events
+        if (data.final && !isStreamingRef.current) {
           textToSpeech(data.text);
+        }
+      }
+    });
+    
+    // Handle streaming translation updates
+    socket.on('translationStream', (data) => {
+      console.log('Received translation stream update');
+      
+      // Mark that we're using streaming translation
+      isStreamingRef.current = true;
+      
+      if (data.translatedText) {
+        setTranslation(data.translatedText);
+        
+        // Convert final translation to speech ONLY when stream is complete
+        // This prevents multiple playback of partial translations
+        if (!data.partial && !hasFinalized.current) {
+          // Set a flag to prevent duplicate requests from multiple final chunks
+          const isFinalizing = hasFinalized.current;
+          hasFinalized.current = true;
+          
+          if (!isFinalizing) {
+            console.log('Final translation received, requesting speech generation');
+            textToSpeech(data.translatedText);
+            
+            // Reset streaming flag after the final chunk
+            setTimeout(() => {
+              isStreamingRef.current = false;
+            }, 100);
+          } else {
+            console.log('Skipping duplicate speech generation request');
+          }
         }
       }
     });
@@ -110,11 +189,196 @@ export default function TranslatorInterface() {
       setIsTranslating(false);
     });
     
-    // Cleanup
+    // Set up handlers for streaming speech
+    socket.on('speechStart', (metadata) => {
+      console.log('Speech generation started:', metadata);
+      audioMetadataRef.current = metadata;
+      audioChunksMapRef.current.clear();
+      
+      // Reset finalization flag when starting new speech
+      hasFinalized.current = false;
+      
+      // We'll collect chunks and play when complete or when enough data is buffered
+    });
+    
+    socket.on('speechChunk', (data) => {
+      try {
+        // Convert chunk buffer to Uint8Array
+        const chunk = new Uint8Array(data.chunk);
+        
+        // Store chunk in map with its index
+        audioChunksMapRef.current.set(data.chunkIndex, chunk);
+        
+        // Skip early playback - only play when complete to avoid duplicates
+        // Comment out progressive playback for now to fix duplication
+        /* 
+        if (data.chunkIndex === 0 && audioMetadataRef.current) {
+          tryPlayAudio();
+        }
+        */
+        
+        // If this is the last chunk, finalize the audio
+        // But only if we haven't already done so via the speechComplete event
+        if (data.isLastChunk && !hasFinalized.current) {
+          console.log('Last audio chunk received, finalizing audio');
+          // Calling finalizeAudio() will set hasFinalized.current = true inside the function
+          finalizeAudio();
+        }
+      } catch (error) {
+        console.error('Error processing speech chunk:', error);
+      }
+    });
+    
+    socket.on('speechComplete', () => {
+      console.log('Speech generation complete');
+      // Only finalize if we haven't already done so
+      if (!hasFinalized.current) {
+        finalizeAudio();
+      } else {
+        console.log('Speech already finalized, skipping duplicate playback');
+      }
+    });
+    
+    // Create function to combine chunks and play audio
+    
+    const finalizeAudio = () => {
+      if (!audioMetadataRef.current) return;
+      
+      // Use an atomic check-and-set to prevent race conditions
+      // This is critical for avoiding duplicate playback from parallel events
+      if (hasFinalized.current) {
+        console.log('Audio already finalized, skipping');
+        return;
+      }
+      
+      // Immediately set finalized flag to block any parallel calls
+      hasFinalized.current = true;
+      
+      try {
+        console.log('Finalizing audio for playback');
+        const metadata = audioMetadataRef.current;
+        
+        // Get all chunks in order
+        const orderedChunks: Uint8Array[] = [];
+        const totalChunks = metadata.totalChunks;
+        
+        for (let i = 0; i < totalChunks; i++) {
+          const chunk = audioChunksMapRef.current.get(i);
+          if (chunk) {
+            orderedChunks.push(chunk);
+          } else {
+            console.warn(`Missing audio chunk at index ${i}`);
+          }
+        }
+        
+        if (orderedChunks.length === 0) {
+          console.error('No audio chunks to play');
+          return;
+        }
+        
+        // Clean up any existing audio URL
+        if (audioURL) {
+          URL.revokeObjectURL(audioURL);
+        }
+        
+        // Create a blob from all chunks
+        const blob = new Blob(orderedChunks, { type: metadata.contentType });
+        const url = URL.createObjectURL(blob);
+        
+        // Update audio state
+        setAudioURL(url);
+        
+        // Play the audio
+        if (audioRef.current) {
+          console.log('Setting audio source and playing');
+          
+          // Make sure we stop any current playback
+          audioRef.current.pause();
+          audioRef.current.currentTime = 0;
+          
+          // Set new source and play
+          audioRef.current.src = url;
+          
+          const playPromise = audioRef.current.play();
+          if (playPromise !== undefined) {
+            playPromise
+              .then(() => {
+                console.log('Audio playback started successfully');
+                setIsPlaying(true);
+              })
+              .catch(error => {
+                console.error('Audio playback error:', error);
+                setIsPlaying(false);
+              });
+          }
+        }
+      } catch (error) {
+        console.error('Error finalizing audio:', error);
+      }
+    };
+    
+    // Function to try playing audio before all chunks are received
+    const tryPlayAudio = () => {
+      if (!audioMetadataRef.current) return;
+      
+      try {
+        const metadata = audioMetadataRef.current;
+        const receivedChunks = [...audioChunksMapRef.current.values()];
+        
+        if (receivedChunks.length > 0) {
+          // Create a blob from available chunks
+          const blob = new Blob(receivedChunks, { type: metadata.contentType });
+          const url = URL.createObjectURL(blob);
+          
+          // Update audio state
+          setAudioURL(url);
+          
+          // Play the audio
+          if (audioRef.current) {
+            audioRef.current.src = url;
+            
+            const playPromise = audioRef.current.play();
+            if (playPromise !== undefined) {
+              playPromise
+                .then(() => setIsPlaying(true))
+                .catch(error => {
+                  // Likely not enough data to play yet, this is normal
+                  console.log('Not enough audio data to start playing yet');
+                });
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Error trying to play partial audio:', error);
+      }
+    };
+    
+    // Add direct transcription handler for improved STT
+    socket.on('directTranscribeSuccess', (data) => {
+      console.log('Direct transcription received:', data);
+      if (data.text) {
+        setTranscription(data.text);
+      }
+    });
+    
+    // Cleanup - make sure to remove all event listeners
     return () => {
       socket.off('transcription');
       socket.off('translation');
+      socket.off('translationStream');
+      socket.off('speechStart');
+      socket.off('speechChunk');
+      socket.off('speechComplete');
+      socket.off('directTranscribeSuccess');
       socket.off('error');
+      
+      // Reset streaming flag
+      isStreamingRef.current = false;
+      
+      // Clean up audio resources
+      if (audioURL) {
+        URL.revokeObjectURL(audioURL);
+      }
     };
   }, [socket, textToSpeech]);
   
@@ -270,7 +534,27 @@ export default function TranslatorInterface() {
         mediaRecorderRef.current.ondataavailable = (event) => {
           if (event.data.size > 0) {
             audioChunksRef.current.push(event.data);
-            // console.log(`Received audio chunk: ${event.data.size} bytes, type: ${event.data.type}`);
+            
+            // Send incremental audio chunks for real-time feedback
+            if (socket && socketConnected && isRecording && audioChunksRef.current.length > 0) {
+              try {
+                // Send the latest audio chunk for partial processing
+                // This creates a more responsive experience
+                const latestChunk = event.data;
+                
+                // Only process chunks that are large enough to contain speech
+                if (latestChunk.size > 500) {
+                  latestChunk.arrayBuffer().then(buffer => {
+                    // Emit partial audio for incremental transcription using direct WebSocket method
+                    socket.emit('transcribeAudio', buffer);
+                  }).catch(error => {
+                    console.error('Error converting audio chunk to buffer:', error);
+                  });
+                }
+              } catch (error) {
+                console.error('Error sending partial audio chunk:', error);
+              }
+            }
           } else {
             console.warn('Received empty audio chunk');
           }
@@ -316,15 +600,12 @@ export default function TranslatorInterface() {
                 console.error('No acknowledgment received from server after 5 seconds');
               }, 5000);
               
-              // Send the complete audio file
-              console.log('Emitting audioChunk event to socket:', socket.id);
-              socket.emit('audioChunk', arrayBuffer, () => {
+              // Use direct transcription via WebSocket
+              console.log('Emitting transcribeAudio event to socket:', socket.id);
+              socket.emit('transcribeAudio', arrayBuffer, () => {
                 clearTimeout(ackTimeout);
-                console.log('Server acknowledged receipt of audio chunk');
+                console.log('Server acknowledged receipt of audio for transcription');
               });
-              
-              // Notify server that stream is complete
-              socket.emit('endAudioStream');
               
               // Set translating state
               setIsTranslating(true);
@@ -350,6 +631,9 @@ export default function TranslatorInterface() {
           // Reset transcription and translation when starting new recording
           setTranscription("");
           setTranslation("");
+          
+          // Reset audio finalization flag
+          hasFinalized.current = false;
           
           // Add a failsafe check to make sure we're getting audio data
           // If after 2 seconds we have no chunks, we may have an issue with the recorder
@@ -416,9 +700,20 @@ export default function TranslatorInterface() {
           
           // Close audio context
           if (audioContextRef.current) {
-            audioContextRef.current.close().catch(console.error);
-            audioContextRef.current = null;
-            analyserRef.current = null;
+            try {
+              // Only close if not already closed
+              if (audioContextRef.current.state !== 'closed') {
+                audioContextRef.current.close().catch(err => {
+                  console.error('Error closing AudioContext:', err);
+                });
+              } else {
+                console.log('AudioContext already closed, skipping close()');
+              }
+              audioContextRef.current = null;
+              analyserRef.current = null;
+            } catch (err) {
+              console.error('Error handling AudioContext cleanup:', err);
+            }
           }
         }, 100);
       } catch (error) {
@@ -458,7 +753,16 @@ export default function TranslatorInterface() {
       }
       
       if (audioContextRef.current) {
-        audioContextRef.current.close().catch(console.error);
+        try {
+          // Only close if not already closed
+          if (audioContextRef.current.state !== 'closed') {
+            audioContextRef.current.close().catch(err => {
+              console.error('Error closing AudioContext on unmount:', err);
+            });
+          }
+        } catch (err) {
+          console.error('Error handling AudioContext cleanup on unmount:', err);
+        }
       }
       
       if (silenceTimeoutRef.current) {
@@ -614,7 +918,15 @@ export default function TranslatorInterface() {
         if (silenceTimer) {
           clearTimeout(silenceTimer);
         }
-        audioContext.close().catch(console.error);
+        try {
+          if (audioContext.state !== 'closed') {
+            audioContext.close().catch(err => {
+              console.error('Error closing AudioContext in silence detection:', err);
+            });
+          }
+        } catch (err) {
+          console.error('Error handling AudioContext cleanup in silence detection:', err);
+        }
       };
     } catch (error) {
       console.error("Error setting up silence detection:", error);
@@ -708,7 +1020,18 @@ export default function TranslatorInterface() {
         )}
       </div>
       
-      <audio ref={audioRef} onEnded={() => setIsPlaying(false)} className="hidden" />
+      <audio 
+        ref={audioRef} 
+        onEnded={() => {
+          console.log('Audio playback ended');
+          setIsPlaying(false);
+        }} 
+        onError={(e) => {
+          console.error('Audio error:', e);
+          setIsPlaying(false);
+        }}
+        className="hidden" 
+      />
       
       <div className="text-center text-sm text-gray-500">
         {isListening ? 'Listening... (will automatically stop when you stop speaking)' : 'Click Start Recording to begin'}

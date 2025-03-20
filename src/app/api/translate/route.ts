@@ -36,8 +36,8 @@ export async function POST(request: NextRequest) {
     const sourceLangName = getLanguageName(sourceLanguage);
     const targetLangName = getLanguageName(targetLanguage);
 
-    // Call the OpenAI Chat API for translation
-    const response = await openai.chat.completions.create({
+    // Create a streaming response for client processing
+    const stream = await openai.chat.completions.create({
       model: 'gpt-4',
       messages: [
         {
@@ -52,15 +52,40 @@ export async function POST(request: NextRequest) {
       ],
       temperature: 0.3,
       max_tokens: 1024,
+      stream: true, // Enable streaming response
     });
 
-    // Extract the translated text from the response
-    const translatedText = response.choices[0]?.message?.content || '';
+    // Convert stream to Response object for Next.js streaming
+    const encoder = new TextEncoder();
+    const readableStream = new ReadableStream({
+      async start(controller) {
+        let translatedText = '';
+        
+        try {
+          for await (const chunk of stream) {
+            const content = chunk.choices[0]?.delta?.content || '';
+            if (content) {
+              translatedText += content;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ translatedText, partial: true })}\n\n`));
+            }
+          }
 
-    return NextResponse.json({
-      translatedText,
-      sourceLanguage,
-      targetLanguage
+          // Send the final complete translation
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ translatedText, partial: false })}\n\n`));
+          controller.close();
+        } catch (error) {
+          console.error('Error in stream processing:', error);
+          controller.error(error);
+        }
+      },
+    });
+
+    return new Response(readableStream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+      },
     });
     
   } catch (error) {
