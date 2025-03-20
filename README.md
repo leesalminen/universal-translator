@@ -1,36 +1,70 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Universal Translator
 
-## Getting Started
+A real-time universal translator web application built with Next.js and OpenAI's APIs. This application allows you to speak in one language and have it translated and spoken back in another language, all in real-time.
 
-First, run the development server:
+## Features
+
+- Speech-to-Text using OpenAI's Whisper API
+- Text Translation using OpenAI's GPT-4 API
+- Text-to-Speech using OpenAI's TTS API
+- Real-time audio processing
+- Multiple language support
+- Modern UI with dark mode support
+- Dockerized deployment
+
+## Prerequisites
+
+- Node.js 18+ 
+- OpenAI API Key
+
+## Environment Variables
+
+Create a `.env.local` file in the root directory with:
+
+```
+OPENAI_API_KEY=your_openai_api_key
+```
+
+## Development
+
+1. Install dependencies:
+
+```bash
+npm install
+```
+
+2. Run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+3. Open [http://localhost:3000](http://localhost:3000) with your browser.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Docker Deployment
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Build the Docker image:
 
-## Learn More
+```bash
+docker build -t universal-translator .
+```
 
-To learn more about Next.js, take a look at the following resources:
+2. Run the container:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+docker run -p 3000:3000 -e OPENAI_API_KEY=your_openai_api_key universal-translator
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+3. Access the application at [http://localhost:3000](http://localhost:3000)
 
-## Deploy on Vercel
+## How to Use
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1. Select your source and target languages from the dropdown menus
+2. Click "Start Recording" and speak into your microphone
+3. After you finish speaking, click "Stop Recording"
+4. The application will transcribe your speech, translate it, and play back the translation
+5. You can replay the translation by clicking the "Play Translation" button
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## License
+
+MIT
