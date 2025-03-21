@@ -26,33 +26,15 @@ app.prepare().then(() => {
       methods: ['GET', 'POST']
     },
     transports: ['websocket'], // Force WebSocket transport only
-    allowUpgrades: true, // Allow protocol upgrades
-    pingTimeout: 60000, // Increase ping timeout for better connection stability (60 seconds)
-    pingInterval: 25000, // How often to ping clients (25 seconds)
-    connectTimeout: 30000, // Increased connection timeout (30 seconds)
   });
 
   // Log when Socket.io server starts
   io.on('connection', (socket) => {
     console.log(`Client connected: ${socket.id}`);
     
-    // Log client information
-    const clientInfo = {
-      id: socket.id,
-      transport: socket.conn.transport.name,
-      address: socket.handshake.address,
-      query: socket.handshake.query,
-      headers: socket.handshake.headers['user-agent'],
-    };
-    
-    console.log('Client details:', JSON.stringify(clientInfo, null, 2));
-    
     socket.on('disconnect', (reason) => {
       console.log(`Client disconnected: ${socket.id}. Reason: ${reason}`);
     });
-    
-    // Log transport type to verify WebSocket is being used
-    console.log(`Transport: ${socket.conn.transport.name}`);
   });
 
   // Apply socket handlers and pass the API key
