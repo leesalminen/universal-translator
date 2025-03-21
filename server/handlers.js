@@ -252,32 +252,50 @@ async function transcribeAudio(audioBuffer, mimeType = 'audio/webm') {
     // Log the audio buffer information for debugging
     console.log(`Transcribing audio: ${audioBuffer.byteLength} bytes, format: ${mimeType}, file: ${tempFilename}`);
     
-    // Create a File object from the buffer with the specified MIME type
-    const file = new File([audioBuffer], tempFilename, { 
-      type: mimeType
-    });
+    const fs = require('fs');
+    const path = require('path');
     
-    console.log(`Created file object: ${file.name}, size: ${file.size}, type: ${file.type}`);
+    // Create a temporary directory if it doesn't exist
+    const tempDir = path.join('/tmp');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    
+    // Write the buffer to a temporary file
+    const tempFilePath = path.join(tempDir, tempFilename);
+    fs.writeFileSync(tempFilePath, audioBuffer);
+    
+    console.log(`Saved audio to temp file: ${tempFilePath}`);
     
     try {
-      // Call the OpenAI API to transcribe the audio
+      // Call the OpenAI API to transcribe the audio using a file path
       const response = await openai.audio.transcriptions.create({
-        file: file,
+        file: fs.createReadStream(tempFilePath),
         model: "whisper-1",
         response_format: "text"
       });
       
-      console.log(`Transcription successful: "${response.text.substring(0, 50)}${response.text.length > 50 ? '...' : ''}"`);
-      return response.text;
+      // Clean up the temporary file
+      try {
+        fs.unlinkSync(tempFilePath);
+        console.log(`Deleted temporary file: ${tempFilePath}`);
+      } catch (cleanupError) {
+        console.error('Error deleting temporary file:', cleanupError);
+      }
+      
+      console.log(`Transcription successful: "${response.substring(0, 50)}${response.length > 50 ? '...' : ''}"`);
+      return response;
     } catch (apiError) {
       // Log detailed API error information
-      console.error('OpenAI API error details:', {
-        status: apiError.status,
-        message: apiError.message,
-        type: apiError.type,
-        param: apiError.param,
-        code: apiError.code
-      });
+      console.error('OpenAI API error details:', apiError);
+      
+      // Clean up the temporary file even on error
+      try {
+        fs.unlinkSync(tempFilePath);
+      } catch (cleanupError) {
+        console.error('Error deleting temporary file after API error:', cleanupError);
+      }
+      
       throw apiError;
     }
   } catch (error) {
